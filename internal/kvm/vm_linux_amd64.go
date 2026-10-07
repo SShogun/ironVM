@@ -38,6 +38,8 @@ type VM struct {
 	fd          int
 	memory      []byte
 	runMmapSize int
+	closing     bool
+	fdReleased  bool
 	closed      bool
 }
 
@@ -96,7 +98,7 @@ func (vm *VM) LoadGuest(gpa uint64, code []byte) error {
 	if vm == nil {
 		return errVMNil
 	}
-	if vm.closed {
+	if vm.closing || vm.closed {
 		return errVMClosed
 	}
 	if len(vm.memory) == 0 {
@@ -110,21 +112,18 @@ func (vm *VM) LoadGuest(gpa uint64, code []byte) error {
 	return nil
 }
 
-// Close releases the VM fd before unmapping its guest RAM backing.
+// Close removes the memory slot, releases the VM fd, and unmaps guest RAM.
+// Operations stop when Close begins. Failed slot removal or unmapping can
+// be retried with another Close; a released fd is never closed again.
 func (vm *VM) Close() error {
-	if vm == nil {
-		return errVMNil
-	}
-	if vm.closed {
-		return errVMClosed
-	}
-	// Remove the slot before releasing the backing mapping. A vCPU fd may keep
-	// the VM alive after its VM fd is closed, so closing the fd alone does not
-	// guarantee that KVM has stopped using this userspace address.
+	return vm.closeWith(removeVMSlot, syscall.Close, syscall.Munmap)
+}
+
+func removeVMSlot(fd int) error {
 	region := userspaceMemoryRegion{slot: 0}
 	_, _, errno := syscall.Syscall(
 		syscall.SYS_IOCTL,
-		uintptr(vm.fd),
+		uintptr(fd),
 		kvmSetUserMemoryRegion,
 		uintptr(unsafe.Pointer(&region)),
 	)
@@ -132,19 +131,41 @@ func (vm *VM) Close() error {
 	if errno != 0 {
 		return fmt.Errorf("ioctl KVM_SET_USER_MEMORY_REGION (remove slot 0): %w", errno)
 	}
-	vm.closed = true
+	return nil
+}
 
+// closeWith keeps failure injection local to the cleanup path.
+func (vm *VM) closeWith(removeSlot func(int) error, closeFD func(int) error, unmap func([]byte) error) error {
+	if vm == nil {
+		return errVMNil
+	}
+	if vm.closed {
+		return errVMClosed
+	}
+	vm.closing = true
 	var closeErr error
-	if err := syscall.Close(vm.fd); err != nil {
-		closeErr = fmt.Errorf("close KVM VM fd: %w", err)
+	// Remove the slot before releasing the backing mapping. A vCPU fd may keep
+	// the VM alive after its VM fd is closed, so closing the fd alone does not
+	// guarantee that KVM has stopped using this userspace address.
+	if !vm.fdReleased {
+		if err := removeSlot(vm.fd); err != nil {
+			return err
+		}
+		// Linux close can release the fd even when it reports an error. Never
+		// retry it, because the fd number may already have been reused.
+		vm.fdReleased = true
+		if err := closeFD(vm.fd); err != nil {
+			closeErr = fmt.Errorf("close KVM VM fd: %w", err)
+		}
 	}
 	if len(vm.memory) != 0 {
-		if err := syscall.Munmap(vm.memory); err != nil {
+		if err := unmap(vm.memory); err != nil {
 			closeErr = errors.Join(closeErr, fmt.Errorf("munmap guest RAM: %w", err))
 		} else {
 			vm.memory = nil
 		}
 	}
+	vm.closed = len(vm.memory) == 0
 	return closeErr
 }
 

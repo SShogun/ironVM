@@ -104,6 +104,7 @@ type VCPU struct {
 	vm        *VM
 	fd        int
 	run       []byte
+	closing   bool
 	closed    bool
 	pendingIO *IOExit
 }
@@ -116,7 +117,7 @@ func (vm *VM) NewVCPU(id int) (*VCPU, error) {
 	if id < 0 {
 		return nil, fmt.Errorf("create vCPU: negative slot id %d", id)
 	}
-	if vm.closed {
+	if vm.closing || vm.closed {
 		return nil, errors.New("create vCPU: VM is closed")
 	}
 	if vm.runMmapSize < kvmRunExitOffset+kvmRunExitSize {
@@ -278,21 +279,33 @@ func sameIOExit(a, b *IOExit) bool {
 }
 
 // Close unmaps the shared run structure and closes the vCPU fd.
+// Operations stop when Close begins. If unmapping fails, another Close
+// retries only the retained mapping; the fd is never closed again.
 func (vcpu *VCPU) Close() error {
+	return vcpu.closeWith(syscall.Close, syscall.Munmap)
+}
+
+// closeWith keeps failure injection local to the cleanup path.
+func (vcpu *VCPU) closeWith(closeFD func(int) error, unmap func([]byte) error) error {
 	if vcpu == nil || vcpu.closed {
 		return errors.New("vCPU is already closed")
 	}
-	vcpu.closed = true
+	closeFDNeeded := !vcpu.closing
+	vcpu.closing = true
 	var closeErr error
 	if vcpu.run != nil {
-		if err := syscall.Munmap(vcpu.run); err != nil {
+		if err := unmap(vcpu.run); err != nil {
 			closeErr = fmt.Errorf("unmap vCPU kvm_run region: %w", err)
+		} else {
+			vcpu.run = nil
 		}
-		vcpu.run = nil
 	}
-	if err := syscall.Close(vcpu.fd); err != nil {
-		closeErr = errors.Join(closeErr, fmt.Errorf("close vCPU fd: %w", err))
+	if closeFDNeeded {
+		if err := closeFD(vcpu.fd); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("close vCPU fd: %w", err))
+		}
 	}
+	vcpu.closed = vcpu.run == nil
 	return closeErr
 }
 
@@ -300,7 +313,7 @@ func (vcpu *VCPU) ensureOpen(operation string) error {
 	if vcpu == nil {
 		return fmt.Errorf("%s: nil vCPU", operation)
 	}
-	if vcpu.closed {
+	if vcpu.closing || vcpu.closed {
 		return fmt.Errorf("%s: vCPU is closed", operation)
 	}
 	return nil
