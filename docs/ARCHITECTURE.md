@@ -386,8 +386,10 @@ V1 dependencies:
 
 ```text
 Go standard library
-golang.org/x/sys/unix
 ```
+
+The current implementation uses the standard-library `syscall` package for
+Linux KVM operations; `go.mod` declares no external modules.
 
 No Go KVM wrapper. If a tiny syscall/`unsafe.Pointer` ioctl helper is clearer, keep it local to `internal/kvm`.
 

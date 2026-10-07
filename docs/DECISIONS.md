@@ -26,11 +26,8 @@ This avoids page tables, GDT work, long-mode transitions, ELF parsing and firmwa
 
 Implement the required KVM UAPI bindings locally.
 
-Allowed dependency:
-
-```text
-golang.org/x/sys/unix
-```
+V1 uses the Go standard library and declares no external module dependencies.
+The current KVM implementation uses Go's `syscall` package.
 
 Do not import a ready-made Go KVM/VMM package. Consult authoritative KVM docs and Linux UAPI headers and define only what IronVM needs.
 
