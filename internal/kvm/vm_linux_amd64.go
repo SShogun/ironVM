@@ -53,11 +53,10 @@ func (s *System) NewVM() (*VM, error) {
 		return nil, fmt.Errorf("create KVM VM: %w", errSystemClosed)
 	}
 
-	vmFDValue, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(s.fd), kvmCreateVM, 0)
-	if errno != 0 {
-		return nil, fmt.Errorf("ioctl KVM_CREATE_VM: %w", errno)
+	vmFD, err := createVMFD(s.fd, syscall.Syscall)
+	if err != nil {
+		return nil, err
 	}
-	vmFD := int(vmFDValue)
 
 	memory, err := syscall.Mmap(-1, 0, guestRAMSize, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANON)
 	if err != nil {
@@ -70,7 +69,7 @@ func (s *System) NewVM() (*VM, error) {
 		memorySize:    uint64(len(memory)),
 		userspaceAddr: uint64(uintptr(unsafe.Pointer(&memory[0]))),
 	}
-	_, _, errno = syscall.Syscall(
+	_, _, errno := syscall.Syscall(
 		syscall.SYS_IOCTL,
 		uintptr(vmFD),
 		kvmSetUserMemoryRegion,
@@ -91,6 +90,20 @@ func (s *System) NewVM() (*VM, error) {
 	}
 
 	return &VM{fd: vmFD, memory: memory, runMmapSize: int(runMmapSize)}, nil
+}
+
+// createVMFD keeps syscall injection local to KVM_CREATE_VM.
+func createVMFD(systemFD int, ioctl func(uintptr, uintptr, uintptr, uintptr) (uintptr, uintptr, syscall.Errno)) (int, error) {
+	for {
+		fd, _, errno := ioctl(syscall.SYS_IOCTL, uintptr(systemFD), kvmCreateVM, 0)
+		if errno == syscall.EINTR {
+			continue
+		}
+		if errno != 0 {
+			return 0, fmt.Errorf("ioctl KVM_CREATE_VM: %w", errno)
+		}
+		return int(fd), nil
+	}
 }
 
 // LoadGuest copies code into the registered guest RAM at the supplied GPA.
