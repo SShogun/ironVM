@@ -56,7 +56,9 @@ status: PASS
 
 The transcript records five KVM exits: two console writes, one host input,
 one guest result write, and HLT. The I/O protocol is byte-wide and supports
-only the ports used by this demo.
+only the ports used by this demo. An unmasked host signal can interrupt
+`KVM_RUN`; IronVM surfaces that `EINTR` as a run error and tears down the demo
+instead of automatically resuming the vCPU.
 
 ## Package boundaries
 
