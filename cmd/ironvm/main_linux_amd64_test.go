@@ -1,9 +1,13 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"ironvm/internal/kvm"
 )
 
 func TestDemoTranscript(t *testing.T) {
@@ -61,4 +65,39 @@ func TestIsUnavailableKVMError(t *testing.T) {
 			}
 		})
 	}
+}
+
+// API and trace output failures must escape run rather than print PASS.
+func TestRunPropagatesOutputErrors(t *testing.T) {
+	sentinel := errors.New("stdout failed")
+	for _, writes := range []int{0, 1, 2, 3, 7, 11, 12} {
+		t.Run(fmt.Sprintf("after_%d_writes", writes), func(t *testing.T) {
+			writer := &cliFailWriter{remaining: writes, err: sentinel}
+			err := run(writer)
+			var environmentError *kvm.EnvironmentError
+			if errors.As(err, &environmentError) && isUnavailableKVMError([]byte(err.Error())) {
+				t.Skipf("KVM unavailable: %v", err)
+			}
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("run() error = %v, want %v", err, sentinel)
+			}
+			if writer.attempts != writes+1 {
+				t.Errorf("write attempts = %d, want %d", writer.attempts, writes+1)
+			}
+		})
+	}
+}
+
+type cliFailWriter struct {
+	remaining, attempts int
+	err                 error
+}
+
+func (w *cliFailWriter) Write(p []byte) (int, error) {
+	w.attempts++
+	if w.remaining == 0 {
+		return 0, w.err
+	}
+	w.remaining--
+	return len(p), nil
 }

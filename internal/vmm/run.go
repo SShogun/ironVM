@@ -8,6 +8,7 @@ import (
 	"ironvm/internal/device"
 	"ironvm/internal/guest"
 	"ironvm/internal/kvm"
+	"ironvm/internal/trace"
 )
 
 // IOEvent records one completed byte-wide guest port-I/O operation.
@@ -29,9 +30,13 @@ type Result struct {
 
 // RunDemo loads and executes the raw M2 guest on an already-open KVM system.
 // The caller retains ownership of system; this function owns the VM and vCPU.
-func RunDemo(system *kvm.System) (result Result, retErr error) {
+func RunDemo(system *kvm.System, tracer *trace.Writer) (result Result, retErr error) {
 	if system == nil {
 		return Result{}, errors.New("run demo: KVM system is nil")
+	}
+
+	if tracer == nil {
+		return Result{}, errors.New("run demo: trace writer is nil")
 	}
 
 	vm, err := system.NewVM()
@@ -62,8 +67,15 @@ func RunDemo(system *kvm.System) (result Result, retErr error) {
 		return Result{}, fmt.Errorf("run demo: configure real-mode vCPU: %w", err)
 	}
 
+	if err := tracer.Setup(64*1024, 0); err != nil {
+		return Result{}, fmt.Errorf("run demo: trace setup: %w", err)
+	}
+
 	portIO := device.NewPortIO()
 	for {
+		if err := tracer.Entry(); err != nil {
+			return Result{}, fmt.Errorf("run demo: trace entry: %w", err)
+		}
 		exit, err := vcpu.Run()
 		if err != nil {
 			return Result{}, fmt.Errorf("run demo: enter guest: %w", err)
@@ -104,7 +116,15 @@ func RunDemo(system *kvm.System) (result Result, retErr error) {
 				return Result{}, fmt.Errorf("run demo: unsupported I/O direction %d", exit.IO.Direction)
 			}
 
+			event := result.Events[len(result.Events)-1]
+			if err := tracer.IOExit(event.Direction, event.Port, event.Value); err != nil {
+				return Result{}, fmt.Errorf("run demo: trace I/O exit: %w", err)
+			}
+
 		case kvm.ExitReasonHLT:
+			if err := tracer.HLT(); err != nil {
+				return Result{}, fmt.Errorf("run demo: trace HLT exit: %w", err)
+			}
 			result.Console = portIO.Console()
 			result.GuestResult, result.HasGuestResult = portIO.Result()
 			result.ExitReason = exit.Reason
@@ -116,6 +136,9 @@ func RunDemo(system *kvm.System) (result Result, retErr error) {
 			}
 			if !result.HasGuestResult || result.GuestResult != 42 {
 				return result, fmt.Errorf("run demo: guest result = %d (seen=%t), want 42", result.GuestResult, result.HasGuestResult)
+			}
+			if err := tracer.Summary(result.Console, result.HostInput, result.GuestResult); err != nil {
+				return result, fmt.Errorf("run demo: trace summary: %w", err)
 			}
 			return result, nil
 
